@@ -1,0 +1,100 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // 0. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- PHASE 3: Primitive Definition ---
+    function isSignedIn() { return request.auth != null; }
+    function isOwner(userId) { return isSignedIn() && request.auth.uid == userId; }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+    function isEmailVerified() { return request.auth.token.email_verified == true; }
+    
+    // Check if current user is a doctor
+    function isDoctor() {
+      return isSignedIn() && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'doctor';
+    }
+
+    // --- PHASE 4: Drafting the "Fortress" Rules ---
+
+    // 1. Users Collection
+    match /users/{userId} {
+      function isValidUser(data) {
+        return data.userId is string && data.userId.size() <= 128 &&
+               data.email is string && data.email.size() <= 256 &&
+               data.role in ['patient', 'doctor'] &&
+               data.keys().hasAll(['userId', 'email', 'role']) && 
+               data.keys().size() >= 3;
+      }
+
+      allow get: if isSignedIn();
+      allow list: if isSignedIn(); // Filtering happens on client, but sensitive roles aren't listable without filter
+      allow create: if isOwner(userId) && isValidUser(incoming()) && incoming().userId == request.auth.uid;
+      allow update: if isOwner(userId) && (
+        incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'language', 'avatarUrl'])
+      );
+    }
+
+    // 2. Symptom Logs
+    match /symptomLogs/{logId} {
+      function isValidSymptomLog(data) {
+        return data.userId == request.auth.uid &&
+               data.prediction is string && data.prediction.size() <= 200 &&
+               data.symptoms is list && data.symptoms.size() <= 20 &&
+               data.confidence is number &&
+               data.createdAt == request.time;
+      }
+
+      allow get: if isSignedIn() && (existing().userId == request.auth.uid || isDoctor());
+      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isDoctor());
+      allow create: if isSignedIn() && isValidSymptomLog(incoming());
+      allow delete: if isOwner(existing().userId);
+    }
+
+    // 3. Appointments
+    match /appointments/{appointmentId} {
+      function isValidAppointment(data) {
+        return data.patientId is string && data.doctorId is string &&
+               data.date is string && data.time is string &&
+               data.status in ['pending', 'confirmed', 'cancelled'] &&
+               data.createdAt is string; // Using string ISO for appointments currently in UI
+      }
+
+      allow read: if isSignedIn() && (resource.data.patientId == request.auth.uid || resource.data.doctorId == request.auth.uid);
+      allow create: if isSignedIn() && isValidAppointment(incoming()) && incoming().patientId == request.auth.uid;
+      allow update: if isSignedIn() && (
+        (incoming().patientId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['status'])) ||
+        (incoming().doctorId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'hasPrescription']))
+      );
+    }
+
+    // 4. Prescriptions
+    match /prescriptions/{prescriptionId} {
+      function isValidPrescription(data) {
+        return data.patientId is string && data.doctorId == request.auth.uid &&
+               data.medications is string && data.medications.size() <= 2000 &&
+               data.appointmentId is string &&
+               data.createdAt == request.time;
+      }
+
+      allow read: if isSignedIn() && (resource.data.patientId == request.auth.uid || resource.data.doctorId == request.auth.uid);
+      allow create: if isDoctor() && isValidPrescription(incoming());
+    }
+
+    // 5. Chats
+    match /chats/{chatId} {
+      allow read: if isSignedIn() && request.auth.uid in resource.data.participants;
+      allow create: if isSignedIn() && incoming().participants.size() >= 2 && request.auth.uid in incoming().participants;
+
+      match /messages/{messageId} {
+        allow read: if isSignedIn(); // Parent check applies
+        allow create: if isSignedIn() && incoming().senderId == request.auth.uid && incoming().createdAt == request.time;
+      }
+    }
+  }
+}

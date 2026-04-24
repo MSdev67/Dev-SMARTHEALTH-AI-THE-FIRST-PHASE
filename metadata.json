@@ -1,0 +1,6 @@
+{
+  "name": "SmartHealth AI",
+  "description": "Advanced medical assistant providing symptom prediction, AI chatbot guidance, doctor consultation booking, and health tracking dashboards.",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["AI disease prediction", "Medical chatbot", "Telemedicine", "Health analytics"]
+}
